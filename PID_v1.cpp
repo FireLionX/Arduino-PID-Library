@@ -1,224 +1,166 @@
-/**********************************************************************************************
- * Arduino PID Library - Version 1.2.1
- * by Brett Beauregard <br3ttb@gmail.com> brettbeauregard.com
- *
- * This Library is licensed under the MIT License
- **********************************************************************************************/
+// *********************************************************************************************************************** //
+// Variables                                                                                                               //
+// *********************************************************************************************************************** //
 
-#if ARDUINO >= 100
-  #include "Arduino.h"
-#else
-  #include "WProgram.h"
-#endif
+//pin definition
+#define ENA 9
+#define IN1 20
+#define IN2 21
+#define SENSOR_PIN A0
 
-#include <PID_v1.h>
 
-/*Constructor (...)*********************************************************
- *    The parameters specified here are those for for which we can't set up
- *    reliable defaults, so we need to have the user set them.
- ***************************************************************************/
-PID::PID(double* Input, double* Output, double* Setpoint,
-        double Kp, double Ki, double Kd, int POn, int ControllerDirection)
+// ******** <TODO> **********************
+// ******** define interval between recomputing error and adjusting feedback (in milliseconds) ********************** 
+const int INTERVAL = 10; 
+const float MAX_SPEED = 255.0;
+const float MIN_SPEED = -255.0;
+
+unsigned long previousTime = 0;
+
+//int motorSpeed = 0; // speed of the motor, values between 0 and 255
+
+int target = 512; // position (as read by potentiometer) to move the motor to, default value 512
+
+// ******** <TODO> **********************
+// ******** define the different gains **********************
+float kp = 0.0; // proportional gain
+float ki = 0.0; // integral gain
+float kd = 0.0; // derivative gain
+
+String commandString, valueString; // strings to read commands from the serial port
+
+int pos = 0; // current position for plotting
+
+float prev_err=0;
+float integral=0;
+
+// setup code, setting pin modes and initialising the serial connection
+void setup() 
 {
-    myOutput = Output;
-    myInput = Input;
-    mySetpoint = Setpoint;
-    inAuto = false;
+    Serial.begin(115200);
 
-    PID::SetOutputLimits(0, 255);				//default output limit corresponds to
-												//the arduino pwm limits
-
-    SampleTime = 100;							//default Controller Sample Time is 0.1 seconds
-
-    PID::SetControllerDirection(ControllerDirection);
-    PID::SetTunings(Kp, Ki, Kd, POn);
-
-    lastTime = millis()-SampleTime;
+    pinMode(ENA, OUTPUT);
+    pinMode(IN1, OUTPUT);
+    pinMode(IN2, OUTPUT);
+    
+    pinMode(SENSOR_PIN, INPUT);   
+    updatePosition();
 }
 
-/*Constructor (...)*********************************************************
- *    To allow backwards compatability for v1.1, or for people that just want
- *    to use Proportional on Error without explicitly saying so
- ***************************************************************************/
-
-PID::PID(double* Input, double* Output, double* Setpoint,
-        double Kp, double Ki, double Kd, int ControllerDirection)
-    :PID::PID(Input, Output, Setpoint, Kp, Ki, Kd, P_ON_E, ControllerDirection)
+unsigned long previousMillis = 0;
+void loop() 
 {
+        //  ******** <TODO> **********************
+        //  ******** implement your code  here **********************
+        //  ******** HINT: you have to use the function readInput() somewhere
+        //     if you wish to update PID parameters from with python script **********************
 
+        // sending the current position to the serial connection so that it can be plotted
+
+        unsigned long currentMillis = millis();
+        
+        if(currentMillis - previousMillis >= INTERVAL){
+          //setMovement(-38); //38 minimum
+          Serial.println(pos);
+          if(abs(pos - target) > (1024 / 360 * 3)){            
+            update();
+          }
+          readInput();
+          previousMillis = currentMillis;
+        }
 }
 
-
-/* Compute() **********************************************************************
- *     This, as they say, is where the magic happens.  this function should be called
- *   every time "void loop()" executes.  the function will decide for itself whether a new
- *   pid Output needs to be computed.  returns true when the output is computed,
- *   false when nothing has been done.
- **********************************************************************************/
-bool PID::Compute()
-{
-   if(!inAuto) return false;
-   unsigned long now = millis();
-   unsigned long timeChange = (now - lastTime);
-   if(timeChange>=SampleTime)
-   {
-      /*Compute all the working error variables*/
-      double input = *myInput;
-      double error = *mySetpoint - input;
-      double dInput = (input - lastInput);
-      outputSum+= (ki * error);
-
-      /*Add Proportional on Measurement, if P_ON_M is specified*/
-      if(!pOnE) outputSum-= kp * dInput;
-
-      if(outputSum > outMax) outputSum= outMax;
-      else if(outputSum < outMin) outputSum= outMin;
-
-      /*Add Proportional on Error, if P_ON_E is specified*/
-	   double output;
-      if(pOnE) output = kp * error;
-      else output = 0;
-
-      /*Compute Rest of PID Output*/
-      output += outputSum - kd * dInput;
-
-	    if(output > outMax) output = outMax;
-      else if(output < outMin) output = outMin;
-	    *myOutput = output;
-
-      /*Remember some variables for next time*/
-      lastInput = input;
-      lastTime = now;
-	    return true;
-   }
-   else return false;
+void update(){
+  float oldPos = pos;
+  updatePosition();
+  float error = target-pos;
+  prev_err = error;
+  
+  float temp = oldPos - pos;
+  
+  float prop = error * kp;
+  prop = abs(prop) < 38 ? 40 * sign(prop) : prop;
+  integral = ki == 0 ? 0 : integral + error * ki * INTERVAL - kp * temp;
+  integral = integral > MAX_SPEED ? MAX_SPEED : integral;
+  integral = integral < MIN_SPEED ? MIN_SPEED : integral;
+  
+  float derivative = temp * kd / INTERVAL;
+  
+  float output = prop + integral - derivative;
+  output = output > MAX_SPEED ? MAX_SPEED : output;
+  output = output < MIN_SPEED ? MIN_SPEED : output;
+  setMovement(output);
 }
 
-/* SetTunings(...)*************************************************************
- * This function allows the controller's dynamic performance to be adjusted.
- * it's called automatically from the constructor, but tunings can also
- * be adjusted on the fly during normal operation
- ******************************************************************************/
-void PID::SetTunings(double Kp, double Ki, double Kd, int POn)
+int sign(int value)
 {
-   if (Kp<0 || Ki<0 || Kd<0) return;
-
-   pOn = POn;
-   pOnE = POn == P_ON_E;
-
-   dispKp = Kp; dispKi = Ki; dispKd = Kd;
-
-   double SampleTimeInSec = ((double)SampleTime)/1000;
-   kp = Kp;
-   ki = Ki * SampleTimeInSec;
-   kd = Kd / SampleTimeInSec;
-
-  if(controllerDirection ==REVERSE)
-   {
-      kp = (0 - kp);
-      ki = (0 - ki);
-      kd = (0 - kd);
-   }
+  if (value == 0) return 0;
+  return value > 0 ? 1 : -1;
 }
 
-/* SetTunings(...)*************************************************************
- * Set Tunings using the last-rembered POn setting
- ******************************************************************************/
-void PID::SetTunings(double Kp, double Ki, double Kd){
-    SetTunings(Kp, Ki, Kd, pOn); 
+void updatePosition()
+{
+  pos = analogRead(SENSOR_PIN);
 }
 
-/* SetSampleTime(...) *********************************************************
- * sets the period, in Milliseconds, at which the calculation is performed
- ******************************************************************************/
-void PID::SetSampleTime(int NewSampleTime)
+// method to set direction and speed of the motor
+void setMovement(float speed1) 
 {
-   if (NewSampleTime > 0)
-   {
-      double ratio  = (double)NewSampleTime
-                      / (double)SampleTime;
-      ki *= ratio;
-      kd /= ratio;
-      SampleTime = (unsigned long)NewSampleTime;
-   }
+  int dir = sign(speed1);
+  
+  if(dir == 1)
+  {
+    digitalWrite(IN2,LOW);
+    digitalWrite(IN1,HIGH);
+  } 
+  else if(dir == -1)
+  {
+    digitalWrite(IN1,LOW);
+    digitalWrite(IN2,HIGH);
+  }
+  else 
+  {
+    digitalWrite(IN1,LOW);
+    digitalWrite(IN2,LOW);
+  }
+  speed1 = speed1 < 0 ? -speed1 : speed1;
+  analogWrite(ENA,speed1);
 }
 
-/* SetOutputLimits(...)****************************************************
- *     This function will be used far more often than SetInputLimits.  while
- *  the input to the controller will generally be in the 0-1023 range (which is
- *  the default already,)  the output will be a little different.  maybe they'll
- *  be doing a time window and will need 0-8000 or something.  or maybe they'll
- *  want to clamp it from 0-125.  who knows.  at any rate, that can all be done
- *  here.
- **************************************************************************/
-void PID::SetOutputLimits(double Min, double Max)
+// method for receiving commands over the serial port
+void readInput() 
 {
-   if(Min >= Max) return;
-   outMin = Min;
-   outMax = Max;
-
-   if(inAuto)
-   {
-	   if(*myOutput > outMax) *myOutput = outMax;
-	   else if(*myOutput < outMin) *myOutput = outMin;
-
-	   if(outputSum > outMax) outputSum= outMax;
-	   else if(outputSum < outMin) outputSum= outMin;
-   }
-}
-
-/* SetMode(...)****************************************************************
- * Allows the controller Mode to be set to manual (0) or Automatic (non-zero)
- * when the transition from manual to auto occurs, the controller is
- * automatically initialized
- ******************************************************************************/
-void PID::SetMode(int Mode)
-{
-    bool newAuto = (Mode == AUTOMATIC);
-    if(newAuto && !inAuto)
-    {  /*we just went from manual to auto*/
-        PID::Initialize();
+    if (Serial.available()) {
+        commandString = Serial.readStringUntil('\n');
+        if (commandString.startsWith("target")) {
+            // change the target value that the motor should rotate to
+            valueString = commandString.substring(7, commandString.length());
+            target = (int) valueString.toInt();
+            if(target>1024){
+              target = 1024;
+            } else if(target<0){
+              target = 0;
+            }
+            integral = 0;
+            prev_err = 0;
+            //  ******** <TODO> **********************
+            //  ******** reset the integral **********************
+            
+        } else if (commandString.startsWith("kp")) {
+            // change the value of the proportional gain parameter
+            valueString = commandString.substring(3, commandString.length());
+            kp = valueString.toFloat();
+            kp = kp < 0 ? 0 : kp;
+        } else if (commandString.startsWith("ki")) {
+            // change the value of the integral gain parameter
+            valueString = commandString.substring(3, commandString.length());
+            ki = valueString.toFloat();
+            ki = ki < 0 ? 0 : ki;
+        } else if (commandString.startsWith("kd")) {
+            // change the value of the derivative gain parameter
+            valueString = commandString.substring(3, commandString.length());
+            kd = valueString.toFloat();
+            kd = kd < 0 ? 0 : kd;
+        }
     }
-    inAuto = newAuto;
 }
-
-/* Initialize()****************************************************************
- *	does all the things that need to happen to ensure a bumpless transfer
- *  from manual to automatic mode.
- ******************************************************************************/
-void PID::Initialize()
-{
-   outputSum = *myOutput;
-   lastInput = *myInput;
-   if(outputSum > outMax) outputSum = outMax;
-   else if(outputSum < outMin) outputSum = outMin;
-}
-
-/* SetControllerDirection(...)*************************************************
- * The PID will either be connected to a DIRECT acting process (+Output leads
- * to +Input) or a REVERSE acting process(+Output leads to -Input.)  we need to
- * know which one, because otherwise we may increase the output when we should
- * be decreasing.  This is called from the constructor.
- ******************************************************************************/
-void PID::SetControllerDirection(int Direction)
-{
-   if(inAuto && Direction !=controllerDirection)
-   {
-	    kp = (0 - kp);
-      ki = (0 - ki);
-      kd = (0 - kd);
-   }
-   controllerDirection = Direction;
-}
-
-/* Status Funcions*************************************************************
- * Just because you set the Kp=-1 doesn't mean it actually happened.  these
- * functions query the internal state of the PID.  they're here for display
- * purposes.  this are the functions the PID Front-end uses for example
- ******************************************************************************/
-double PID::GetKp(){ return  dispKp; }
-double PID::GetKi(){ return  dispKi;}
-double PID::GetKd(){ return  dispKd;}
-int PID::GetMode(){ return  inAuto ? AUTOMATIC : MANUAL;}
-int PID::GetDirection(){ return controllerDirection;}
-
